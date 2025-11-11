@@ -23,33 +23,84 @@ def get_all_kebaps_as_df():
     print("GOOGLE SHEET WIRD GELESEN...")  # (Für Debugging)
 
     # Authentifizierung über Streamlit Secrets
-    creds = Credentials.from_service_account_info(
-        st.secrets["gcp_service_account"],
-        scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"],
-    )
-    client = gspread.authorize(creds)
-
-    # Öffne das Sheet
     try:
-        sheet = client.open(st.secrets["gcp_sheet_name"]).sheet1
+        creds = Credentials.from_service_account_info(
+            st.secrets["gcp_service_account"],
+            scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"],
+        )
+        client = gspread.authorize(creds)
     except Exception as e:
-        st.error(f"Fehler beim Öffnen des Google Sheets: {e}")
+        st.error(f"FEHLER bei Authentifizierung: {e}")
+        st.error("Prüfe deine 'gcp_service_account' Secrets.")
         return pd.DataFrame()
 
-    # Lese Daten in ein DataFrame
-    # header=1 bedeutet, dass die Spaltennamen in Zeile 1 sind
-    df = get_as_dataframe(sheet, header=1, usecols=[0, 1, 2, 3, 4, 5],
-                          dtype={'id': int, 'gewicht_g': int, 'personen': int})
+    # --- NEUER, ROBUSTERER LADE-PROZESS ---
+    try:
+        # 1. Öffne die Datei (das Spreadsheet)
+        spreadsheet = client.open(st.secrets["gcp_sheet_name"])
+
+        # 2. Öffne das spezifische Tabellenblatt (Worksheet)
+        # WICHTIG: Ersetze "Tabellenblatt1" mit dem exakten Namen deines Tabs!
+        worksheet_name = "Tabellenblatt1"
+        sheet = spreadsheet.worksheet(worksheet_name)
+
+    except gspread.exceptions.WorksheetNotFound:
+        st.error(
+            f"FEHLER: Konnte Tab '{worksheet_name}' im Google Sheet '{st.secrets['gcp_sheet_name']}' nicht finden.")
+        st.error("Bitte stelle sicher, dass der Tab-Name exakt übereinstimmt (Groß/Kleinschreibung!).")
+        return pd.DataFrame()  # Zurück mit leerem DataFrame
+    except Exception as e:
+        st.error(f"Fehler beim Öffnen des Google Sheets '{st.secrets['gcp_sheet_name']}': {e}")
+        st.error(
+            "Prüfe: 1. Ist der Name 'gcp_sheet_name' in den Secrets korrekt? 2. Hast du die Bot-E-Mail freigegeben?")
+        return pd.DataFrame()
+
+    # 3. Lese Daten in ein DataFrame
+    # Wir lesen erstmal alles als Text (str), um Konvertierungsfehler zu vermeiden
+    df = get_as_dataframe(sheet, header=1, usecols=[0, 1, 2, 3, 4, 5], dtype=str)
+
+    # 4. DER WICHTIGSTE DEBUG-SCHRITT:
+    # Bevor wir etwas tun, prüfen wir die Spalten, die wir geladen haben.
+    if df.empty or df.columns.empty:
+        st.warning("Das Google Sheet-Tab scheint leer zu sein oder hat keine Header-Zeile.")
+        return pd.DataFrame()
+
+    expected_cols = ['id', 'datum', 'gewicht_g', 'zubereitet', 'personen', 'uhrzeit']
+
+    # Bereinige die Spaltennamen (entferne Leerzeichen, alles klein)
+    actual_cols = [str(col).lower().strip() for col in df.columns]
+    df.columns = actual_cols  # Setze die bereinigten Spaltennamen
+
+    # Prüfe, ob die erwarteten Spalten da sind
+    missing_cols = [col for col in expected_cols if col not in actual_cols]
+
+    if 'id' not in actual_cols:  # Speziell für deinen Fehler
+        st.error(f"SCHWERER FEHLER: 'KeyError: id'")
+        st.error(f"Dein Google Sheet in Zeile 1 hat die falschen Spaltennamen!")
+        st.error(f"ERWARTET (u.a.): 'id'")
+        st.error(f"GEFUNDEN: {actual_cols}")
+        st.error("Bitte korrigiere Zeile 1 in deinem LIVE Google Sheet exakt so, dass sie 'id' enthält.")
+        return pd.DataFrame()  # Zurück mit leerem DataFrame
+    elif missing_cols:
+        st.warning(f"Warnung: Folgende Spalten fehlen im Google Sheet: {missing_cols}. Die App könnte abstürzen.")
+
+    # 5. Daten konvertieren und säubern (NACHDEM wir wissen, dass 'id' da ist)
     df = df.dropna(subset=['id'])  # Leere Zeilen entfernen
+    df = df[df['id'] != '']  # Zeilen ohne ID entfernen
 
-    if df.empty:
-        return df
+    # Jetzt konvertieren wir die Typen sicher
+    try:
+        df['id'] = pd.to_numeric(df['id'])
+        df['gewicht_g'] = pd.to_numeric(df['gewicht_g'])
+        df['personen'] = pd.to_numeric(df['personen'])
+    except Exception as e:
+        st.error(f"FEHLER bei der Daten-Konvertierung (z.B. Text in 'gewicht_g'-Spalte?): {e}")
+        return pd.DataFrame()
 
-    # --- Datenaufbereitung (Cleaning) ---
+    # --- (Rest der Datenaufbereitung) ---
     try:
         df['DateTime'] = pd.to_datetime(df['datum'] + ' ' + df['uhrzeit'])
     except Exception:
-        # Fallback, falls Datum/Uhrzeit-Format fehlerhaft ist
         df['DateTime'] = pd.NaT
 
     df['Wochentag'] = df['DateTime'].dt.strftime('%a')
@@ -60,6 +111,7 @@ def get_all_kebaps_as_df():
     weekday_german = {'Mon': 'Mo', 'Tue': 'Di', 'Wed': 'Mi', 'Thu': 'Do', 'Fri': 'Fr', 'Sat': 'Sa', 'Sun': 'So'}
     df['Wochentag_DE'] = df['Wochentag'].map(weekday_german)
 
+    print("Google Sheet erfolgreich gelesen und aufbereitet.")
     return df
 
 
@@ -70,7 +122,8 @@ def _connect_to_gsheet():
         scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"],
     )
     client = gspread.authorize(creds)
-    sheet = client.open(st.secrets["gcp_sheet_name"]).sheet1
+    # WICHTIG: Auch hier den korrekten Tab-Namen eintragen!
+    sheet = client.open(st.secrets["gcp_sheet_name"]).worksheet("Tabellenblatt1")
     return sheet
 
 
@@ -80,7 +133,7 @@ def add_kebap(datum, gewicht, zubereitet, personen, uhrzeit):
 
     # Finde die nächste freie ID
     all_ids = sheet.col_values(1)[1:]  # [1:] um den Header zu überspringen
-    all_ids = [int(i) for i in all_ids if i.isdigit()]  # Nur Zahlen
+    all_ids = [int(i) for i in all_ids if str(i).isdigit()]  # Nur Zahlen
     next_id = max(all_ids) + 1 if all_ids else 1
 
     # Daten als Liste anhängen (Reihenfolge muss exakt stimmen!)
@@ -113,7 +166,6 @@ def update_kebap(id, datum, gewicht, zubereitet, personen, uhrzeit):
 
     sheet = _connect_to_gsheet()
     # Update die Zellen in der gefundenen Zeile (Achtung: 1-indiziert)
-    # Reihenfolge: id, datum, gewicht_g, zubereitet, personen, uhrzeit
     sheet.update_cell(row_index, 1, int(id))  # Spalte 1 (A)
     sheet.update_cell(row_index, 2, str(datum))  # Spalte 2 (B)
     sheet.update_cell(row_index, 3, int(gewicht))  # Spalte 3 (C)
@@ -137,7 +189,7 @@ def delete_kebap(id):
     st.cache_data.clear()
 
 
-# --- 2. Plotting-Funktionen (bleiben 1:1 identisch, kein Fehler hier) ---
+# --- 2. Plotting-Funktionen (bleiben 1:1 identisch) ---
 
 def plot_weight_distribution(df):
     fig, ax = plt.subplots(figsize=(10, 6))
@@ -202,7 +254,7 @@ def plot_weight_over_time_of_day(df):
     sns.regplot(x='Stunde', y='gewicht_g', data=df, ci=95, scatter_kws={'alpha': 0.7}, ax=ax)
     ax.set_title('Kebapgewicht in Abhängigkeit von der Uhrzeit')
     ax.set_xlabel('Uhrzeit (Stunde des Tages)')
-    ax.set_Geylabel('Gewicht [g]')
+    ax.set_ylabel('Gewicht [g]')
     min_hour = int(np.floor(df['Stunde'].min()))
     max_hour = int(np.ceil(df['Stunde'].max()))
     ax.set_xticks(ticks=range(min_hour, max_hour + 2))
@@ -215,12 +267,9 @@ def plot_weight_over_time_of_day(df):
 
 def main_app():
     st.set_page_config(page_title="Kebapstudie Dashboard", layout="wide")
-
-    # --- NEUE DEBUG-ZEILE ---
-    st.write("Verfügbare Secrets:", st.secrets.keys())
-    # --- ENDE DEBUG ---
-    
     st.title("🥙 Kebapstudie 2025 Dashboard")
+
+    # (Die Debug-Zeile, die wir vorher hinzugefügt haben, ist hier nicht mehr drin)
 
     sns.set_theme(style="whitegrid")
 
@@ -302,7 +351,6 @@ def main_app():
         if st.button("Ausgewählte ID laden"):
             try:
                 python_id_to_load = int(id_to_edit)
-                # Lade die Zeile aus dem DataFrame, das ist schneller als eine neue API-Anfrage
                 entry_df = df[df['id'] == python_id_to_load].iloc[0]
 
                 st.session_state.loaded_data = {
@@ -363,4 +411,5 @@ def main_app():
 
 # --- Skript-Start ---
 if __name__ == "__main__":
+    # init_db() # (Wird nicht mehr gebraucht, da Google Sheets die DB ist)
     main_app()
