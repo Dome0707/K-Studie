@@ -7,105 +7,89 @@ import numpy as np
 import gspread
 from gspread_dataframe import get_as_dataframe, set_with_dataframe
 from google.oauth2.service_account import Credentials
-import io  # (Importiere io für alle Fälle)
+import io
 
 
 # streamlit run app.py
 
 # --- 1. Google Sheets Verbindung & Konfiguration ---
 
-# Caching für die Haupt-Datenladefunktion
-@st.cache_data(ttl=600)  # (ttl=600 -> Cache läuft alle 10 Minuten ab)
-def get_all_kebaps_as_df():
+@st.cache_resource(ttl=3600)  # Cache die Verbindung für 1 Stunde
+def connect_to_gspread():
     """
-    Holt alle Daten aus dem Google Sheet und gibt sie als bereinigtes Pandas DataFrame zurück.
-    Das Ergebnis wird gecached.
+    Stellt EINMALIG die Verbindung zu Google her und gibt den
+    autorisierten Client zurück.
     """
-    print("GOOGLE SHEET WIRD GELESEN...")  # (Für Debugging)
-
-    # Authentifizierung über Streamlit Secrets
+    print("STELLE NEUE VERBINDUNG ZU GOOGLE HER...")
     try:
         creds = Credentials.from_service_account_info(
             st.secrets["gcp_service_account"],
             scopes=["https.www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"],
         )
         client = gspread.authorize(creds)
+        return client
     except Exception as e:
         st.error(f"FEHLER bei Authentifizierung: {e}")
         st.error("Prüfe deine 'gcp_service_account' Secrets.")
+        return None
+
+
+@st.cache_data(ttl=600)  # Cache die DATEN für 10 Minuten
+def get_all_kebaps_as_df(_client):
+    """
+    Holt alle Daten aus dem Google Sheet und gibt sie als bereinigtes Pandas DataFrame zurück.
+    Nimmt den gecachten Client als Argument.
+    """
+    print("GOOGLE SHEET WIRD GELESEN...")
+
+    if _client is None:
+        st.error("Verbindung zu Google fehlgeschlagen. App kann nicht laden.")
         return pd.DataFrame()
 
-    # --- NEUER, ROBUSTERER LADE-PROZESS ---
     try:
-        # 1. Öffne die Datei (das Spreadsheet)
-        spreadsheet = client.open(st.secrets["gcp_sheet_name"])
-
-        # 2. Öffne das spezifische Tabellenblatt (Worksheet)
+        spreadsheet = _client.open(st.secrets["gcp_sheet_name"])
         worksheet_name = "Tabellenblatt1"
         sheet = spreadsheet.worksheet(worksheet_name)
-
     except gspread.exceptions.WorksheetNotFound:
-        st.error(
-            f"FEHLER: Konnte Tab '{worksheet_name}' im Google Sheet '{st.secrets['gcp_sheet_name']}' nicht finden.")
-        st.error("Bitte stelle sicher, dass der Tab-Name exakt übereinstimmt (Groß/Kleinschreibung!).")
-        return pd.DataFrame()  # Zurück mit leerem DataFrame
+        st.error(f"FEHLER: Konnte Tab '{worksheet_name}' nicht finden.")
+        return pd.DataFrame()
     except Exception as e:
-        st.error(f"Fehler beim Öffnen des Google Sheets '{st.secrets['gcp_sheet_name']}': {e}")
-        st.error(
-            "Prüfe: 1. Ist der Name 'gcp_sheet_name' in den Secrets korrekt? 2. Hast du die Bot-E-Mail freigegeben?")
+        st.error(f"Fehler beim Öffnen des Google Sheets: {e}")
         return pd.DataFrame()
 
-    # 3. Lese Daten in ein DataFrame
-    # Wir lesen erstmal alles als Text (str), um Konvertierungsfehler zu vermeiden
     df = get_as_dataframe(sheet, header=1, usecols=[0, 1, 2, 3, 4, 5], dtype=str)
 
-    # 4. DER WICHTIGSTE DEBUG-SCHRITT:
-    # Bevor wir etwas tun, prüfen wir die Spalten, die wir geladen haben.
     if df.empty or df.columns.empty:
         st.warning("Das Google Sheet-Tab scheint leer zu sein oder hat keine Header-Zeile.")
         return pd.DataFrame()
 
     expected_cols = ['id', 'datum', 'gewicht_g', 'zubereitet', 'personen', 'uhrzeit']
-
-    # Bereinige die Spaltennamen (entferne Leerzeichen, alles klein)
     actual_cols = [str(col).lower().strip() for col in df.columns]
-    df.columns = actual_cols  # Setze die bereinigten Spaltennamen
+    df.columns = actual_cols
 
-    # Prüfe, ob die erwarteten Spalten da sind
-    missing_cols = [col for col in expected_cols if col not in actual_cols]
+    if 'id' not in actual_cols:
+        st.error(f"SCHWERER FEHLER: 'KeyError: id'. GEFUNDEN: {actual_cols}")
+        st.error("Bitte korrigiere Zeile 1 in deinem LIVE Google Sheet.")
+        return pd.DataFrame()
 
-    if 'id' not in actual_cols:  # Speziell für deinen Fehler
-        st.error(f"SCHWERER FEHLER: 'KeyError: id'")
-        st.error(f"Dein Google Sheet in Zeile 1 hat die falschen Spaltennamen!")
-        st.error(f"ERWARTET (u.a.): 'id'")
-        st.error(f"GEFUNDEN: {actual_cols}")
-        st.error("Bitte korrigiere Zeile 1 in deinem LIVE Google Sheet exakt so, dass sie 'id' enthält.")
-        return pd.DataFrame()  # Zurück mit leerem DataFrame
-    elif missing_cols:
-        st.warning(f"Warnung: Folgende Spalten fehlen im Google Sheet: {missing_cols}. Die App könnte abstürzen.")
-
-    # 5. Daten konvertieren und säubern (NACHDEM wir wissen, dass 'id' da ist)
-    df = df.dropna(subset=['id'])  # Leere Zeilen entfernen
-    df = df[df['id'] != '']  # Zeilen ohne ID entfernen
+    df = df.dropna(subset=['id'])
+    df = df[df['id'] != '']
 
     if df.empty:
-        return df
+        return pd.DataFrame()
 
-    # Jetzt konvertieren wir die Typen sicher
     try:
         df['id'] = pd.to_numeric(df['id'])
         df['gewicht_g'] = pd.to_numeric(df['gewicht_g'])
         df['personen'] = pd.to_numeric(df['personen'])
     except Exception as e:
-        st.error(f"FEHLER bei der Daten-Konvertierung (z.B. Text in 'gewicht_g'-Spalte?): {e}")
+        st.error(f"FEHLER bei der Daten-Konvertierung: {e}")
         return pd.DataFrame()
 
-    # --- (Rest der Datenaufbereitung) ---
     try:
-        # Diese Version liest ISO-Datum (YYYY-MM-DD) und ISO-Zeit (HH:MM:SS)
-        df['DateTime'] = pd.to_datetime(df['datum'] + ' ' + df['uhrzeit'])
-    except Exception as e:
-        st.warning(f"Warnung: Datumsformat-Problem. {e}")
+        # Flexible Lese-Funktion
+        df['DateTime'] = pd.to_datetime(df['datum'] + ' ' + df['uhrzeit'], dayfirst=True)
+    except Exception:
         df['DateTime'] = pd.NaT
 
     df['Wochentag'] = df['DateTime'].dt.strftime('%a')
@@ -120,82 +104,65 @@ def get_all_kebaps_as_df():
     return df
 
 
-def _connect_to_gsheet():
-    """Stellt die Verbindung her und gibt das Sheet-Objekt zurück."""
-    creds = Credentials.from_service_account_info(
-        st.secrets["gcp_service_account"],
-        scopes=["https.www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"],
-    )
-    client = gspread.authorize(creds)
-    # WICHTIG: Auch hier den korrekten Tab-Namen eintragen!
+# --- SCHREIB-FUNKTIONEN (NEHMEN JETZT 'client' ALS ARGUMENT) ---
+
+def add_kebap(client, datum, gewicht, zubereitet, personen, uhrzeit):
+    """Fügt einen neuen Datenpunkt hinzu (verwendet bestehenden Client)."""
     sheet = client.open(st.secrets["gcp_sheet_name"]).worksheet("Tabellenblatt1")
-    return sheet
 
-
-def add_kebap(datum, gewicht, zubereitet, personen, uhrzeit):
-    """Fügt einen neuen Datenpunkt zum Google Sheet hinzu."""
-    sheet = _connect_to_gsheet()
-
-    # Finde die nächste freie ID
-    all_ids = sheet.col_values(1)[1:]  # [1:] um den Header zu überspringen
-    all_ids = [int(i) for i in all_ids if str(i).isdigit()]  # Nur Zahlen
+    all_ids = sheet.col_values(1)[1:]
+    all_ids = [int(i) for i in all_ids if str(i).isdigit()]
     next_id = max(all_ids) + 1 if all_ids else 1
 
-    # Daten als Liste anhängen (Reihenfolge muss exakt stimmen!)
     # Speichert im ISO-Format (YYYY-MM-DD und HH:MM:SS)
     new_row = [next_id, str(datum), int(gewicht), str(zubereitet), int(personen), str(uhrzeit)]
     sheet.append_row(new_row)
 
-    # Cache leeren
-    st.cache_data.clear()
+    st.cache_data.clear()  # Lösche den DATEN-Cache
 
 
-def get_kebap_row_by_id(id):
-    """Findet die Zeilennummer (Row Index) im Sheet anhand der ID."""
-    sheet = _connect_to_gsheet()
+def get_kebap_row_by_id(client, id):
+    """Findet die Zeilennummer (verwendet bestehenden Client)."""
+    sheet = client.open(st.secrets["gcp_sheet_name"]).worksheet("Tabellenblatt1")
     try:
-        cell = sheet.find(str(id), in_column=1)  # Finde die ID in Spalte 1
-        return cell.row  # Gibt die Zeilennummer zurück
+        cell = sheet.find(str(id), in_column=1)
+        return cell.row
     except gspread.exceptions.CellNotFound:
         return None
-    except Exception as e:
-        print(f"Fehler bei get_kebap_row_by_id: {e}")
-        return None
 
 
-def update_kebap(id, datum, gewicht, zubereitet, personen, uhrzeit):
-    """Aktualisiert einen bestehenden Eintrag im Google Sheet."""
-    row_index = get_kebap_row_by_id(id)
+def update_kebap(client, id, datum, gewicht, zubereitet, personen, uhrzeit):
+    """Aktualisiert einen Eintrag (verwendet bestehenden Client)."""
+    row_index = get_kebap_row_by_id(client, id)
     if row_index is None:
         st.error(f"Konnte Eintrag mit ID {id} zum Aktualisieren nicht finden.")
         return
 
-    sheet = _connect_to_gsheet()
-    # Update die Zellen in der gefundenen Zeile (Achtung: 1-indiziert)
-    sheet.update_cell(row_index, 1, int(id))  # Spalte 1 (A)
-    sheet.update_cell(row_index, 2, str(datum))  # Spalte 2 (B)
-    sheet.update_cell(row_index, 3, int(gewicht))  # Spalte 3 (C)
-    sheet.update_cell(row_index, 4, str(zubereitet))  # Spalte 4 (D)
-    sheet.update_cell(row_index, 5, int(personen))  # Spalte 5 (E)
-    sheet.update_cell(row_index, 6, str(uhrzeit))  # Spalte 6 (F)
+    sheet = client.open(st.secrets["gcp_sheet_name"]).worksheet("Tabellenblatt1")
+    sheet.update_cell(row_index, 1, int(id))
+    sheet.update_cell(row_index, 2, str(datum))
+    sheet.update_cell(row_index, 3, int(gewicht))
+    sheet.update_cell(row_index, 4, str(zubereitet))
+    sheet.update_cell(row_index, 5, int(personen))
+    sheet.update_cell(row_index, 6, str(uhrzeit))
 
-    st.cache_data.clear()
+    st.cache_data.clear()  # Lösche den DATEN-Cache
 
 
-def delete_kebap(id):
-    """Löscht einen Eintrag aus dem Google Sheet."""
-    row_index = get_kebap_row_by_id(id)
+def delete_kebap(client, id):
+    """Löscht einen Eintrag (verwendet bestehenden Client)."""
+    row_index = get_kebap_row_by_id(client, id)
     if row_index is None:
         st.error(f"Konnte Eintrag mit ID {id} zum Löschen nicht finden.")
         return
 
-    sheet = _connect_to_gsheet()
+    sheet = client.open(st.secrets["gcp_sheet_name"]).worksheet("Tabellenblatt1")
     sheet.delete_rows(row_index)
 
-    st.cache_data.clear()
+    st.cache_data.clear()  # Lösche den DATEN-Cache
 
 
-# --- 2. Plotting-Funktionen (bleiben 1:1 identisch) ---
+# --- 2. Plotting-Funktionen (Unverändert) ---
 
 def plot_weight_distribution(df):
     fig, ax = plt.subplots(figsize=(10, 6))
@@ -224,7 +191,6 @@ def plot_weight_by_preparer(df):
 
 def plot_weight_by_weekday(df):
     fig, ax = plt.subplots(figsize=(10, 6))
-    # FIX: Entfernt Zeilen mit ungültigem Datum
     df_cleaned = df.dropna(subset=['Wochentag_DE'])
     weekday_order_de = ['Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So']
     sns.boxplot(x='Wochentag_DE', y='gewicht_g', data=df_cleaned, order=weekday_order_de, ax=ax)
@@ -262,9 +228,8 @@ def plot_weight_over_time_of_day(df):
     sns.regplot(x='Stunde', y='gewicht_g', data=df, ci=95, scatter_kws={'alpha': 0.7}, ax=ax)
     ax.set_title('Kebapgewicht in Abhängigkeit von der Uhrzeit')
     ax.set_xlabel('Uhrzeit (Stunde des Tages)')
-    ax.set_ylabel('Gewicht [g]')  # FIX: Tippfehler 'Geylabel' behoben
+    ax.set_ylabel('Gewicht [g]')
 
-    # Filtere NaN-Werte oder unendliche Werte heraus, bevor min/max berechnet wird
     valid_stunde = df['Stunde'].dropna()
     valid_stunde = valid_stunde[np.isfinite(valid_stunde)]
     if not valid_stunde.empty:
@@ -277,19 +242,23 @@ def plot_weight_over_time_of_day(df):
     return fig
 
 
-# --- 3. Die Streamlit-App (Logik bleibt fast identisch) ---
+# --- 3. Die Streamlit-App (Angepasst, um den 'client' zu übergeben) ---
 
 def main_app():
     st.set_page_config(page_title="Kebapstudie Dashboard", layout="wide")
     st.title("🥙 Kebapstudie 2025 Dashboard")
 
-    # DEBUG-ZEILE: Zeigt die geladenen Secrets an (kann entfernt werden, wenn alles läuft)
-    # st.write("Verfügbare Secrets:", st.secrets.keys())
-
     sns.set_theme(style="whitegrid")
 
-    # Lade Daten (gecached)
-    df = get_all_kebaps_as_df()
+    # --- ÄNDERUNG: Stelle EINMALIG die Verbindung her ---
+    client = connect_to_gspread()
+
+    if client is None:
+        # App anhalten, wenn die Authentifizierung fehlschlägt
+        st.stop()
+
+        # Lade Daten (gecached) und übergebe den client
+    df = get_all_kebaps_as_df(client)
 
     if df.empty:
         known_preparers = ["OG1", "OG2", "CHEF", "IDIOT", "ANDERE"]
@@ -311,7 +280,8 @@ def main_app():
 
     if add_submitted:
         uhrzeit_str = uhrzeit.strftime('%H:%M:%S')
-        add_kebap(datum, gewicht, zubereitet.upper(), personen, uhrzeit_str)
+        # --- ÄNDERUNG: Übergebe den 'client' ---
+        add_kebap(client, datum, gewicht, zubereitet.upper(), personen, uhrzeit_str)
         st.sidebar.success(f"Datenpunkt ({gewicht}g, {zubereitet}) gespeichert!")
         st.rerun()
 
@@ -353,7 +323,6 @@ def main_app():
     with st.expander("📝 Daten bearbeiten oder löschen"):
         st.subheader("1. Eintrag zum Bearbeiten laden")
 
-        # WICHTIG: Die ID muss ein Integer sein für den nächsten Schritt
         df['id'] = pd.to_numeric(df['id'])
 
         all_ids = sorted(df['id'].unique(), reverse=True)
@@ -407,13 +376,16 @@ def main_app():
 
             if update_submitted:
                 uhrzeit_str = edit_uhrzeit.strftime('%H:%M:%S')
-                update_kebap(data['id'], edit_datum, edit_gewicht, edit_zubereitet.upper(), edit_personen, uhrzeit_str)
+                # --- ÄNDERUNG: Übergebe den 'client' ---
+                update_kebap(client, data['id'], edit_datum, edit_gewicht, edit_zubereitet.upper(), edit_personen,
+                             uhrzeit_str)
                 st.session_state.loaded_data = None
                 st.success(f"Eintrag ID {data['id']} erfolgreich aktualisiert!")
                 st.rerun()
 
             if delete_submitted:
-                delete_kebap(data['id'])
+                # --- ÄNDERUNG: Übergebe den 'client' ---
+                delete_kebap(client, data['id'])
                 st.session_state.loaded_data = None
                 st.warning(f"Eintrag ID {data['id']} wurde gelöscht!")
                 st.rerun()
