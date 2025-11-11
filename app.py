@@ -14,7 +14,7 @@ import io
 
 # --- 1. Google Sheets Verbindung & Konfiguration ---
 
-@st.cache_resource(ttl=3600)  # Cache die Verbindung für 1 Stunde
+@st.cache_resource(ttl=3600)  # Cache die VERBINDUNG für 1 Stunde
 def connect_to_gspread():
     """
     Stellt EINMALIG die Verbindung zu Google her und gibt den
@@ -87,7 +87,7 @@ def get_all_kebaps_as_df(_client):
         return pd.DataFrame()
 
     try:
-        # Flexible Lese-Funktion
+        # Flexible Lese-Funktion (liest YYYY-MM-DD und TT.MM.JJJJ)
         df['DateTime'] = pd.to_datetime(df['datum'] + ' ' + df['uhrzeit'], dayfirst=True)
     except Exception:
         df['DateTime'] = pd.NaT
@@ -255,6 +255,7 @@ def main_app():
 
     if client is None:
         # App anhalten, wenn die Authentifizierung fehlschlägt
+        st.error("Kritischer Authentifizierungsfehler. App angehalten.")
         st.stop()
 
         # Lade Daten (gecached) und übergebe den client
@@ -285,7 +286,7 @@ def main_app():
         st.sidebar.success(f"Datenpunkt ({gewicht}g, {zubereitet}) gespeichert!")
         st.rerun()
 
-    if df.empty:
+    if df.empty and client is not None:  # Zeige nur, wenn Verbindung OK, aber Daten leer
         st.warning("Noch keine Daten in der Datenbank. Bitte links Daten eingeben.")
         st.stop()
 
