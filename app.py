@@ -192,8 +192,8 @@ def plot_weight_over_time_of_day(df):
 # --- 3. Die Streamlit-App (mit allen Features) ---
 
 def main_app():
-    st.set_page_config(page_title="Kebartudie Dashboard", layout="wide")
-    st.title("🥙 Kebartudie 2025 Dashboard")
+    st.set_page_config(page_title="Kebapstudie Dashboard", layout="wide")
+    st.title("🥙 Kebapstudie 2025 Dashboard")
 
     # Setze den Plot-Stil für alle Plots
     sns.set_theme(style="whitegrid")
