@@ -215,6 +215,11 @@ def plot_weight_over_time_of_day(df):
 
 def main_app():
     st.set_page_config(page_title="Kebapstudie Dashboard", layout="wide")
+
+    # --- NEUE DEBUG-ZEILE ---
+    st.write("Verfügbare Secrets:", st.secrets.keys())
+    # --- ENDE DEBUG ---
+    
     st.title("🥙 Kebapstudie 2025 Dashboard")
 
     sns.set_theme(style="whitegrid")
