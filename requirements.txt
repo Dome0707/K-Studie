@@ -6,3 +6,4 @@ numpy
 gspread
 gspread-dataframe
 google-auth
+scipy
