@@ -9,6 +9,8 @@ import gspread
 from gspread_dataframe import get_as_dataframe, set_with_dataframe
 from google.oauth2.service_account import Credentials
 import scipy.stats as stats
+from matplotlib.offsetbox import OffsetImage, AnnotationBbox
+import matplotlib.image as mpimg
 
 
 # --- 1. Google Sheets Verbindung & Konfiguration ---
@@ -202,18 +204,40 @@ def plot_moving_average(df):
 
 
 def plot_cumulative_weight(df):
+    """Summen-Plot mit Döner-Icon am Ende"""
     fig, ax = plt.subplots(figsize=(12, 6))
     df_sorted = df.sort_values('DateTime')
     df_sorted['Cumulative_KG'] = df_sorted['gewicht_g'].cumsum() / 1000.0
+
+    # Die Linie zeichnen
     sns.lineplot(x='DateTime', y='Cumulative_KG', data=df_sorted, drawstyle='steps-post', ax=ax, color='green',
                  linewidth=3)
     ax.fill_between(df_sorted['DateTime'], df_sorted['Cumulative_KG'], color='green', alpha=0.1)
-    # UPDATE: Titel geändert
+
+    # --- KEBAP ICON LOGIK ---
+    if not df_sorted.empty:
+        try:
+            # 1. Koordinaten des letzten Punktes holen (Aktueller Stand)
+            last_x = df_sorted['DateTime'].iloc[-1]
+            last_y = df_sorted['Cumulative_KG'].iloc[-1]
+
+            # 2. Bild laden (muss im GitHub Repo liegen!)
+            # 'zoom' steuert die Größe des Döners. Probier 0.1 bis 0.3 aus.
+            img = mpimg.imread("kebap_icon.png")
+            imagebox = OffsetImage(img, zoom=0.15)
+
+            # 3. Bild an die Koordinaten heften
+            ab = AnnotationBbox(imagebox, (last_x, last_y), frameon=False)
+            ax.add_artist(ab)
+        except Exception:
+            # Falls das Bild fehlt, stürzt die App nicht ab, sondern macht einfach weiter
+            pass
+    # ------------------------
+
     ax.set_title('Gesamter Kebapkonsum (in kg)')
     ax.set_ylabel('Summe (kg)')
     plt.xticks(rotation=45)
     return fig
-
 
 # --- 3. Erweiterte Statistik-Funktion ---
 
